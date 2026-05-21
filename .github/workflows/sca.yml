@@ -1,0 +1,99 @@
+name: SCA – Dependency Vulnerability Scan
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  schedule:
+    - cron: "0 4 * * 1"   # elke maandag om 04:00 UTC
+
+jobs:
+  sca-analysis:
+    name: SCA – npm audit + OWASP Dependency-Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run npm audit (SCA)
+        id: npm_audit
+        run: |
+          echo "Running npm audit..."
+          npm audit --audit-level=critical --json > npm-audit-report.json || true
+
+          CRITICAL=$(cat npm-audit-report.json | python3 -c "
+          import json,sys
+          data=json.load(sys.stdin)
+          meta=data.get('metadata',{})
+          vulns=meta.get('vulnerabilities',{})
+          print(vulns.get('critical',0))
+          ")
+
+          HIGH=$(cat npm-audit-report.json | python3 -c "
+          import json,sys
+          data=json.load(sys.stdin)
+          meta=data.get('metadata',{})
+          vulns=meta.get('vulnerabilities',{})
+          print(vulns.get('high',0))
+          ")
+
+          echo "Critical vulnerabilities: $CRITICAL"
+          echo "High vulnerabilities: $HIGH"
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "juice-shop"
+          path: "."
+          format: "SARIF"
+          out: "dependency-check-report"
+          args: >
+            --enableRetired
+            --failOnCVSS 7
+
+      - name: Upload Dependency-Check SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: dependency-check-report/dependency-check-report.sarif
+
+      - name: Block pipeline on vulnerabilities
+        run: |
+          CRITICAL=${{ steps.npm_audit.outputs.critical }}
+          HIGH=${{ steps.npm_audit.outputs.high }}
+
+          echo "=========================================="
+          echo " SCA Vulnerability Summary"
+          echo "=========================================="
+          echo " Critical : $CRITICAL"
+          echo " High     : $HIGH"
+          echo "=========================================="
+
+          if [ "$CRITICAL" -gt "0" ] || [ "$HIGH" -gt "0" ]; then
+            echo "Pipeline BLOCKED: critical=$CRITICAL high=$HIGH vulnerabilities found in dependencies!"
+            exit 1
+          else
+            echo "No critical/high vulnerabilities found. Pipeline passed."
+          fi
+
+      - name: Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: npm-audit-report.json
