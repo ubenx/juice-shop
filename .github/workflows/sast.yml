@@ -1,0 +1,74 @@
+name: SAST – CodeQL Analysis
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  schedule:
+    - cron: "0 3 * * 1"   # elke maandag om 03:00 UTC
+
+jobs:
+  codeql-analysis:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["javascript-typescript"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality   # blokkeert op security-queries
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: results
+          upload: false   # we uploaden zelf zodat we kunnen blokkeren
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results
+
+      - name: Check for vulnerabilities and block pipeline
+        run: |
+          SARIF_FILE=$(find results -name "*.sarif" | head -n 1)
+          echo "Checking: $SARIF_FILE"
+          
+          VULN_COUNT=$(python3 -c "
+          import json, sys
+          with open('$SARIF_FILE') as f:
+              data = json.load(f)
+          results = []
+          for run in data.get('runs', []):
+              results.extend(run.get('results', []))
+          # filter op error-level (echte security issues)
+          errors = [r for r in results if r.get('level') in ('error', 'warning')]
+          print(len(errors))
+          ")
+          
+          echo "Vulnerabilities found: $VULN_COUNT"
+          
+          if [ "$VULN_COUNT" -gt "0" ]; then
+            echo "Pipeline blocked: $VULN_COUNT vulnerability/vulnerabilities detected!"
+            exit 1
+          else
+            echo "No vulnerabilities detected. Pipeline passed."
+          fi
