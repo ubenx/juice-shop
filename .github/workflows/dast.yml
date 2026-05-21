@@ -1,0 +1,93 @@
+name: DAST – OWASP ZAP Dynamic Scan
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  schedule:
+    - cron: "0 6 * * 1"   # elke maandag om 06:00 UTC
+
+jobs:
+  dast-scan:
+    name: DAST – OWASP ZAP against live Juice-Shop
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install Juice-Shop dependencies
+        run: npm install --ignore-scripts
+
+      - name: Start Juice-Shop in background
+        run: |
+          nohup npm start &
+          echo "Waiting for Juice-Shop to be ready..."
+
+      - name: Wait for Juice-Shop to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:3000 > /dev/null; then
+              echo "✅ Juice-Shop is up and running!"
+              break
+            fi
+            echo "Attempt $i/30 – waiting 10s..."
+            sleep 10
+          done
+
+          # Final check
+          if ! curl -s http://localhost:3000 > /dev/null; then
+            echo "❌ Juice-Shop failed to start after 5 minutes"
+            exit 1
+          fi
+
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "http://localhost:3000"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a -j"
+          fail_action: true        # blokkeert pipeline bij findings
+          allow_issue_writing: false
+        continue-on-error: true
+        id: zap_scan
+
+      - name: Upload ZAP SARIF report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+        continue-on-error: true
+
+      - name: Upload ZAP HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: report_html.html
+
+      - name: Block pipeline on DAST findings
+        run: |
+          echo "=========================================="
+          echo " DAST SCAN RESULT"
+          echo "=========================================="
+
+          if [ "${{ steps.zap_scan.outcome }}" == "failure" ]; then
+            echo "Pipeline BLOCKED: OWASP ZAP detected vulnerabilities!"
+            echo " Download the ZAP HTML report artifact for full details."
+            echo "=========================================="
+            exit 1
+          else
+            echo "No blocking vulnerabilities found. Pipeline passed."
+            echo "=========================================="
+          fi
